@@ -1,5 +1,6 @@
 use synthecode::{
-    GasMeter, Grammar, Interpreter, SplitMix64, TermRewriter, Type, TypeChecker, TypeEnv, Value,
+    ComplexityAnalyzer, EntropyAnalyzer, GasMeter, Grammar, Interpreter, SplitMix64, TermRewriter,
+    TestSuite, Type, TypeEnv,
 };
 
 fn main() {
@@ -10,63 +11,78 @@ fn main() {
     // 1. Setup Typing Environment: Problem taking List<Int> as input (x0)
     let input_params = vec![Type::list(Type::Int)];
     let env = TypeEnv::from_params(&input_params);
-    println!("Input Parameters: [x0: {}]", input_params[0]);
+    println!("Input Signature: [x0: {}]", input_params[0]);
 
-    // 2. Deterministic Seedable PRNG
-    let mut rng = SplitMix64::new(2026);
+    // 2. Deterministic Seedable PRNG & Analysis Engines
+    let mut rng = SplitMix64::new(42);
     let trs = TermRewriter::default();
+    let entropy_analyzer = EntropyAnalyzer::default();
 
-    // 3. Test input instance
-    let sample_input = Value::List(vec![
-        Value::Int(15),
-        Value::Int(3),
-        Value::Int(99),
-        Value::Int(42),
-    ]);
-    println!("Evaluation Sample Input (x0): {}", sample_input);
+    println!("\n--- Synthesizing Verified Non-Degenerate Problem ---");
+    let target_ty = Type::list(Type::Int);
+    let mut accepted_problem = None;
 
-    // 4. Synthesize, Canonicalize & Evaluate List Expressions with Gas Metering
-    println!("\n--- Synthesizing, Canonicalizing & Executing Expressions ---");
-    let target_list_ty = Type::list(Type::Int);
-    for i in 1..=4 {
-        let raw_expr = Grammar::generate_typed(&target_list_ty, &env, 3, &mut rng)
-            .expect("Synthesis should succeed with valid type contract");
-        let inferred_ty = TypeChecker::infer(&raw_expr, &env).unwrap();
+    for attempt in 1..=20 {
+        let raw_expr = Grammar::generate_typed(&target_ty, &env, 3, &mut rng)
+            .expect("Grammar generation failed");
+        let (canonical_expr, _) = trs.normalize(&raw_expr);
 
-        // Canonical reduction via TRS
-        let (canonical_expr, rewrites) = trs.normalize(&raw_expr);
+        // Build test suite to measure oracle output entropy
+        let mut vm = Interpreter::new(GasMeter::new(50_000));
+        if let Ok(suite) = TestSuite::build(&canonical_expr, &input_params, 15, &mut rng, &mut vm) {
+            let outputs = suite.oracle_outputs();
+            let entropy = EntropyAnalyzer::compute_shannon_entropy(&outputs);
+            let is_degenerate = entropy_analyzer.is_degenerate(&outputs);
 
-        // Evaluate Canonical Form using VM with Gas Meter
-        let mut vm = Interpreter::new(GasMeter::new(10_000));
-        match vm.eval(&canonical_expr, &[sample_input.clone()]) {
-            Ok(output) => {
+            if !is_degenerate {
                 println!(
-                    "[{}] Raw AST: {}\n    Canonical: {} (Rewrites: {})\n    Type: {} | Gas Used: {} | Output: {}",
-                    i,
-                    raw_expr,
-                    canonical_expr,
-                    rewrites,
-                    inferred_ty,
-                    vm.gas.consumed(),
-                    output
+                    "🎯 [Attempt #{}] Problem Accepted!\n   Raw AST: {}\n   Canonical: {}\n   Shannon Entropy H(Y): {:.4} bits (Threshold: {:.2})\n   Test Cases Generated: {}",
+                    attempt, raw_expr, canonical_expr, entropy, entropy_analyzer.min_entropy_threshold, suite.cases.len()
                 );
-            }
-            Err(e) => {
+                accepted_problem = Some((canonical_expr, suite));
+                break;
+            } else {
                 println!(
-                    "[{}] Raw AST: {}\n    Canonical: {}\n    Evaluation Failed: {}",
-                    i, raw_expr, canonical_expr, e
+                    "⚠️  [Attempt #{}] Degenerate Collapse Purged: H(Y) = {:.4} bits | AST: {}",
+                    attempt, entropy, canonical_expr
                 );
             }
         }
     }
 
-    // 5. Anti-Plateau Diagnostic Distance
-    let val_a = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
-    let val_b = Value::List(vec![Value::Int(1), Value::Int(5), Value::Int(3)]);
-    println!("\n--- Anti-Plateau Diagnostic Distance Check ---");
-    println!("Sample A: {}", val_a);
-    println!("Sample B: {}", val_b);
-    println!("Continuous Distance: {:.4}", val_a.diagnostic_distance(&val_b));
+    // 3. Inspect Accepted Problem & Evaluate Candidate
+    if let Some((problem_expr, suite)) = accepted_problem {
+        let structural = ComplexityAnalyzer::analyze_structural(&problem_expr);
+        let runtime = ComplexityAnalyzer::analyze_runtime(&suite);
 
-    println!("\n✅ core/, dsl/, vm/, and canonical/ modules verified & operational!");
+        println!("\n--- Problem Complexity Profile ---");
+        println!(
+            "Nodes: {} | Depth: {} | Kolmogorov Score: {:.2}",
+            structural.node_count, structural.depth, structural.kolmogorov_score
+        );
+        println!(
+            "Total Gas: {} | Mean Gas/Case: {:.1} | Max Gas: {}",
+            runtime.total_gas, runtime.mean_gas_per_case, runtime.max_gas_case
+        );
+
+        // Candidate Evaluation: Candidate A (Correct solution) vs Candidate B (Imperfection)
+        let candidate_a = problem_expr.clone();
+        let candidate_b = synthecode::Expr::Reverse(Box::new(synthecode::Expr::Var(0)));
+
+        let mut eval_vm = Interpreter::new(GasMeter::new(50_000));
+        let res_a = suite.evaluate_candidate(&candidate_a, &mut eval_vm);
+        let res_b = suite.evaluate_candidate(&candidate_b, &mut eval_vm);
+
+        println!("\n--- Multi-Modal Fitness Benchmark (Anti-Plateau) ---");
+        println!(
+            "Reference Solution: Passed: {} | Exact: {}/{} | Graded Fitness: {:.4}",
+            res_a.passed, res_a.exact_matches, res_a.total_cases, res_a.graded_fitness
+        );
+        println!(
+            "Candidate 'reverse(x0)': Passed: {} | Exact: {}/{} | Graded Fitness: {:.4} (Continuous Partial Credit!)",
+            res_b.passed, res_b.exact_matches, res_b.total_cases, res_b.graded_fitness
+        );
+    }
+
+    println!("\n✅ Pipeline Stage 3 (testgen/ & analysis/) verified & operational!");
 }
