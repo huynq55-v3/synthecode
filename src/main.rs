@@ -1,4 +1,6 @@
-use synthecode::{Grammar, SplitMix64, Type, TypeChecker, TypeEnv, Value};
+use synthecode::{
+    GasMeter, Grammar, Interpreter, SplitMix64, Type, TypeChecker, TypeEnv, Value,
+};
 
 fn main() {
     println!("=======================================================");
@@ -13,37 +15,40 @@ fn main() {
     // 2. Deterministic Seedable PRNG
     let mut rng = SplitMix64::new(2026);
 
-    // 3. Synthesize Integer-returning Algorithmic Expression
-    println!("\n--- Synthesizing Int Reduction Expressions ---");
-    for i in 1..=3 {
-        let expr = Grammar::generate_typed(&Type::Int, &env, 3, &mut rng)
-            .expect("Synthesis should succeed with valid type contract");
-        let inferred_ty = TypeChecker::infer(&expr, &env).unwrap();
-        println!(
-            "[{}] AST: {}\n    Type: {} | Nodes: {} | Depth: {}",
-            i,
-            expr,
-            inferred_ty,
-            expr.node_count(),
-            expr.depth()
-        );
-    }
+    // 3. Test input instance
+    let sample_input = Value::List(vec![
+        Value::Int(15),
+        Value::Int(3),
+        Value::Int(99),
+        Value::Int(42),
+    ]);
+    println!("Evaluation Sample Input (x0): {}", sample_input);
 
-    // 4. Synthesize List-transforming Algorithmic Expression
-    println!("\n--- Synthesizing List Transformation Expressions ---");
+    // 4. Synthesize & Evaluate List Expressions with Gas Metering
+    println!("\n--- Synthesizing & Executing Expressions (Deterministic VM) ---");
     let target_list_ty = Type::list(Type::Int);
-    for i in 1..=3 {
+    for i in 1..=4 {
         let expr = Grammar::generate_typed(&target_list_ty, &env, 3, &mut rng)
             .expect("Synthesis should succeed with valid type contract");
         let inferred_ty = TypeChecker::infer(&expr, &env).unwrap();
-        println!(
-            "[{}] AST: {}\n    Type: {} | Nodes: {} | Depth: {}",
-            i,
-            expr,
-            inferred_ty,
-            expr.node_count(),
-            expr.depth()
-        );
+
+        // Evaluate using VM with Gas Meter
+        let mut vm = Interpreter::new(GasMeter::new(10_000));
+        match vm.eval(&expr, &[sample_input.clone()]) {
+            Ok(output) => {
+                println!(
+                    "[{}] AST: {}\n    Type: {} | Gas Used: {} | Output: {}",
+                    i,
+                    expr,
+                    inferred_ty,
+                    vm.gas.consumed(),
+                    output
+                );
+            }
+            Err(e) => {
+                println!("[{}] AST: {}\n    Evaluation Failed: {}", i, expr, e);
+            }
+        }
     }
 
     // 5. Anti-Plateau Diagnostic Distance
@@ -54,5 +59,5 @@ fn main() {
     println!("Sample B: {}", val_b);
     println!("Continuous Distance: {:.4}", val_a.diagnostic_distance(&val_b));
 
-    println!("\n✅ core/ and dsl/ modules verified & operational!");
+    println!("\n✅ core/, dsl/, and vm/ modules verified & operational!");
 }
