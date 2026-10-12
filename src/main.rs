@@ -1,5 +1,5 @@
 use synthecode::{
-    GasMeter, Grammar, Interpreter, SplitMix64, Type, TypeChecker, TypeEnv, Value,
+    GasMeter, Grammar, Interpreter, SplitMix64, TermRewriter, Type, TypeChecker, TypeEnv, Value,
 };
 
 fn main() {
@@ -14,6 +14,7 @@ fn main() {
 
     // 2. Deterministic Seedable PRNG
     let mut rng = SplitMix64::new(2026);
+    let trs = TermRewriter::default();
 
     // 3. Test input instance
     let sample_input = Value::List(vec![
@@ -24,29 +25,37 @@ fn main() {
     ]);
     println!("Evaluation Sample Input (x0): {}", sample_input);
 
-    // 4. Synthesize & Evaluate List Expressions with Gas Metering
-    println!("\n--- Synthesizing & Executing Expressions (Deterministic VM) ---");
+    // 4. Synthesize, Canonicalize & Evaluate List Expressions with Gas Metering
+    println!("\n--- Synthesizing, Canonicalizing & Executing Expressions ---");
     let target_list_ty = Type::list(Type::Int);
     for i in 1..=4 {
-        let expr = Grammar::generate_typed(&target_list_ty, &env, 3, &mut rng)
+        let raw_expr = Grammar::generate_typed(&target_list_ty, &env, 3, &mut rng)
             .expect("Synthesis should succeed with valid type contract");
-        let inferred_ty = TypeChecker::infer(&expr, &env).unwrap();
+        let inferred_ty = TypeChecker::infer(&raw_expr, &env).unwrap();
 
-        // Evaluate using VM with Gas Meter
+        // Canonical reduction via TRS
+        let (canonical_expr, rewrites) = trs.normalize(&raw_expr);
+
+        // Evaluate Canonical Form using VM with Gas Meter
         let mut vm = Interpreter::new(GasMeter::new(10_000));
-        match vm.eval(&expr, &[sample_input.clone()]) {
+        match vm.eval(&canonical_expr, &[sample_input.clone()]) {
             Ok(output) => {
                 println!(
-                    "[{}] AST: {}\n    Type: {} | Gas Used: {} | Output: {}",
+                    "[{}] Raw AST: {}\n    Canonical: {} (Rewrites: {})\n    Type: {} | Gas Used: {} | Output: {}",
                     i,
-                    expr,
+                    raw_expr,
+                    canonical_expr,
+                    rewrites,
                     inferred_ty,
                     vm.gas.consumed(),
                     output
                 );
             }
             Err(e) => {
-                println!("[{}] AST: {}\n    Evaluation Failed: {}", i, expr, e);
+                println!(
+                    "[{}] Raw AST: {}\n    Canonical: {}\n    Evaluation Failed: {}",
+                    i, raw_expr, canonical_expr, e
+                );
             }
         }
     }
@@ -59,5 +68,5 @@ fn main() {
     println!("Sample B: {}", val_b);
     println!("Continuous Distance: {:.4}", val_a.diagnostic_distance(&val_b));
 
-    println!("\n✅ core/, dsl/, and vm/ modules verified & operational!");
+    println!("\n✅ core/, dsl/, vm/, and canonical/ modules verified & operational!");
 }
